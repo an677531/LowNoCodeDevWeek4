@@ -1,0 +1,115 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "MCP Dev-Notes Server Walkthrough",
+  "description": "A guided tour of the dev-notes MCP server — how it initializes, registers tools (save, list, read, delete, tag), saves files, and communicates with Claude Code over stdio.",
+  "steps": [
+    {
+      "file": "index.js",
+      "line": 11,
+      "title": "1/18 — Import: McpServer",
+      "description": "## The Core MCP Class\n\n`McpServer` is the main class from the `@modelcontextprotocol/sdk`. It handles:\n\n- Accepting JSON-RPC requests from Claude Code\n- Routing those requests to the right tool handler\n- Sending JSON-RPC responses back\n\nThink of it as an Express app, but instead of HTTP routes, it has **tools** that an AI can call."
+    },
+    {
+      "file": "index.js",
+      "line": 12,
+      "title": "2/18 — Import: StdioServerTransport",
+      "description": "## The Communication Layer\n\n`StdioServerTransport` wires the server to **stdin** and **stdout**.\n\nClaude Code launches this server as a child process and communicates by:\n- Writing JSON-RPC requests to the server's **stdin**\n- Reading JSON-RPC responses from the server's **stdout**\n\nThis is the standard transport for local MCP servers. Remote servers could use HTTP/SSE instead."
+    },
+    {
+      "file": "index.js",
+      "line": 13,
+      "title": "3/18 — Import: Zod",
+      "description": "## Input Validation with Zod\n\n`z` from Zod is used to define **input schemas** for each tool.\n\nWhen you write `z.string().describe(\"Title of the note\")`, you're declaring:\n1. The parameter must be a **string** (validated at runtime)\n2. The description tells Claude **what the parameter is for** (so it knows what to pass)\n\nThe MCP SDK converts these Zod schemas into JSON Schema under the hood."
+    },
+    {
+      "file": "index.js",
+      "line": 14,
+      "title": "4/18 — Import: Node.js built-ins",
+      "description": "## Node.js Standard Library\n\n- `fs/promises` — Async file operations (read, write, mkdir, readdir, stat, unlink)\n- `path` — Build cross-platform file paths (so `/` vs `\\` is handled automatically)\n- `os` — Get the user's home directory with `os.homedir()` (e.g., `/Users/tony`)\n\nThese three modules are all this server needs to manage files on disk. No database required."
+    },
+    {
+      "file": "index.js",
+      "line": 23,
+      "title": "5/18 — Configuration: NOTES_DIR",
+      "description": "## Where Notes Live\n\n`path.join(os.homedir(), \"dev-notes\")` resolves to `~/dev-notes/`.\n\nThis is the single source of truth for where all notes are stored. Every tool references this constant, so changing it here changes the storage location everywhere."
+    },
+    {
+      "file": "index.js",
+      "line": 30,
+      "title": "6/18 — Helper: slugify()",
+      "description": "## Title-to-Filename Conversion\n\n`slugify()` is the glue that ties all title-based tools together. `save_note`, `read_note`, `delete_note`, and `tag_note` all pass the title through this same function, so they always resolve to the same filename.\n\nThe pipeline:\n```\n\"Project Ideas!\" → toLowerCase → \"project ideas!\"\n                 → trim         → \"project ideas!\"\n                 → replace       → \"project-ideas\"   (non-alphanumeric → hyphens)\n                 → strip edges   → \"project-ideas\"   (remove leading/trailing hyphens)\n                 → append        → \"project-ideas.md\"\n```"
+    },
+    {
+      "file": "index.js",
+      "line": 42,
+      "title": "7/18 — Helper: ensureNotesDir()",
+      "description": "## Create Directory If Missing\n\n`fs.mkdir(NOTES_DIR, { recursive: true })` creates `~/dev-notes/` if it doesn't exist.\n\nThe `{ recursive: true }` flag means:\n- If the directory already exists, **do nothing** (no error)\n- If parent directories are missing, create those too\n\nThis is called at the start of `save_note` and `list_notes` so the server never crashes due to a missing directory."
+    },
+    {
+      "file": "index.js",
+      "line": 52,
+      "title": "8/18 — Server Initialization",
+      "description": "## Creating the MCP Server Instance\n\n`new McpServer({ name, version })` creates the server.\n\n- `name: \"dev-notes\"` — Identifies this server to Claude Code. This is what you see when you run `mcp list`.\n- `version: \"1.0.0\"` — Semantic version reported to the client.\n\nAt this point the server exists in memory but **isn't running yet** — it has no tools registered and no transport connected. Those come next."
+    },
+    {
+      "file": "index.js",
+      "line": 64,
+      "title": "9/18 — Tool Registration: save_note",
+      "description": "## Registering the save_note Tool\n\n`server.tool()` takes 4 arguments:\n\n1. **Name** (`\"save_note\"`) — The identifier Claude uses to call this tool\n2. **Description** (`\"Save a markdown note...\"`) — Tells Claude when/why to use it\n3. **Input schema** — A Zod object defining the parameters (`title` and `content`, both strings)\n4. **Handler** — The async function that runs when the tool is called\n\nThe SDK automatically validates inputs against the Zod schema before invoking the handler."
+    },
+    {
+      "file": "index.js",
+      "line": 72,
+      "title": "10/18 — save_note: Writing to Disk",
+      "description": "## How save_note Creates Files\n\nThe handler follows a clear sequence:\n\n1. **Line 74:** `ensureNotesDir()` — Make sure `~/dev-notes/` exists\n2. **Line 77:** `slugify(title)` — Convert `\"Project Ideas\"` → `\"project-ideas.md\"`\n3. **Line 78:** `path.join(NOTES_DIR, filename)` — Build full path: `~/dev-notes/project-ideas.md`\n4. **Line 81:** `fs.writeFile(filePath, content, \"utf-8\")` — Write the markdown content\n\nIf the file already exists, `writeFile` **overwrites** it silently. There's no versioning or conflict detection."
+    },
+    {
+      "file": "index.js",
+      "line": 85,
+      "title": "11/18 — MCP Response Format",
+      "description": "## The Standard MCP Return Value\n\nEvery tool handler must return an object with a `content` array:\n\n```js\n{ content: [{ type: \"text\", text: \"...\" }] }\n```\n\n- `type` can be `\"text\"`, `\"image\"`, or `\"resource\"` (this server only uses text)\n- The `text` value is what Claude Code receives as the tool result\n- For errors, you add `isError: true` to the top level (see `read_note` on line 171, `delete_note` on line 208, and `tag_note` on line 258)"
+    },
+    {
+      "file": "index.js",
+      "line": 102,
+      "title": "12/18 — Tool Registration: list_notes",
+      "description": "## The list_notes Tool\n\nThis tool takes **no parameters** (empty schema `{}`). When called, it:\n\n1. Reads the `~/dev-notes/` directory with `fs.readdir()`\n2. Filters for `.md` files only\n3. Gets file stats (`fs.stat()`) for each file's last-modified date\n4. Reverses the slug back to a readable title: `\"project-ideas.md\"` → `\"Project Ideas\"`\n5. Returns a formatted list\n\nNote the use of `Promise.all()` on line 122 — it fetches stats for all files **in parallel** for better performance."
+    },
+    {
+      "file": "index.js",
+      "line": 154,
+      "title": "13/18 — Tool Registration: read_note",
+      "description": "## The read_note Tool\n\nThis tool mirrors `save_note` by using the same `slugify()` function to find the file.\n\nThe key difference is the **error handling** (lines 169-179):\n- It wraps `fs.readFile()` in a try/catch\n- On failure, it returns `{ isError: true, content: [...] }` instead of throwing\n- The `isError` flag tells Claude Code the call failed, so it can explain the problem to the user rather than treating the error text as note content"
+    },
+    {
+      "file": "index.js",
+      "line": 190,
+      "title": "14/18 — Tool Registration: delete_note",
+      "description": "## The delete_note Tool\n\nFollows the same pattern as `read_note`: slugify the title, build the path, then act on the file.\n\nThe key filesystem call is `fs.unlink(filePath)` on **line 201** — this is Node's way of deleting a file.\n\nLike `read_note`, it uses try/catch to handle the case where the note doesn't exist, returning `isError: true` with a descriptive message instead of crashing."
+    },
+    {
+      "file": "index.js",
+      "line": 201,
+      "title": "15/18 — delete_note: fs.unlink()",
+      "description": "## Deleting Files with fs.unlink()\n\n`fs.unlink(filePath)` removes the file from disk. It's the async equivalent of the `rm` command.\n\n- If the file exists, it's deleted permanently (no trash/recycle bin)\n- If the file doesn't exist, it throws an error — which the catch block on line 207 handles gracefully\n\nThe response confirms deletion with the human-readable title and the actual filename."
+    },
+    {
+      "file": "index.js",
+      "line": 229,
+      "title": "16/18 — Tool Registration: tag_note",
+      "description": "## The tag_note Tool\n\nThis tool introduces a **new Zod type**: `z.array(z.string())` on line 234.\n\nThis tells the SDK that `tags` must be an **array of strings** — e.g., `[\"cli\", \"tools\", \"mcp\"]`. The SDK validates this at runtime, so the handler is guaranteed to receive a proper array.\n\nThe tool reads an existing note, prepends/replaces a `Tags: ...` line, and writes it back."
+    },
+    {
+      "file": "index.js",
+      "line": 244,
+      "title": "17/18 — tag_note: Prepend vs Replace Logic",
+      "description": "## Smart Tag Line Handling\n\nThis is the core logic of `tag_note`:\n\n```js\nconst tagLine = `Tags: ${tags.join(\", \")}`;\nconst lines = existing.split(\"\\n\");\nconst updated = lines[0]?.startsWith(\"Tags: \")\n  ? [tagLine, ...lines.slice(1)]   // replace existing tag line\n  : [tagLine, ...lines];            // prepend new tag line\n```\n\nTwo cases:\n1. **First line starts with `Tags: `** → Replace that line with the new tags (so tags don't stack up)\n2. **First line is anything else** → Prepend the tag line above the existing content\n\nThis makes `tag_note` **idempotent** — calling it multiple times just updates the same line."
+    },
+    {
+      "file": "index.js",
+      "line": 277,
+      "title": "18/18 — Starting the Server (stdio)",
+      "description": "## Connecting the Transport and Going Live\n\nThis is where everything comes together:\n\n1. **Line 278:** Create a `StdioServerTransport` — listens on stdin, writes to stdout\n2. **Line 279:** `server.connect(transport)` — Hooks the server to the transport\n\nAfter `connect()`, the server enters a loop:\n- **Claude Code writes** a JSON-RPC request to stdin (e.g., `{\"method\": \"tools/call\", \"params\": {\"name\": \"save_note\", ...}}`)\n- **The server** routes it to the matching tool handler\n- **The handler** runs and returns a result\n- **The server writes** the JSON-RPC response to stdout\n\nThe `.catch()` on line 284 is a safety net — if the server fails to start, it logs the error and exits with code 1.\n\nAll 5 tools are now registered and ready: `save_note`, `list_notes`, `read_note`, `delete_note`, and `tag_note`."
+    }
+  ]
+}
